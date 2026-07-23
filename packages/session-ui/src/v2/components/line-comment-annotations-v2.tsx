@@ -200,7 +200,7 @@ export function createLineCommentControllerV2<T extends LineCommentShape>(props:
       return
     }
 
-    note.openDraft(range)
+    note.select(range)
   }
 
   const onLineNumberSelectionEnd = (range: SelectedLineRange | null) => {

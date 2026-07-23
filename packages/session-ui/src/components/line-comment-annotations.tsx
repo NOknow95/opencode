@@ -465,7 +465,7 @@ export function createLineCommentController<T extends LineCommentShape>(
       return
     }
 
-    note.openDraft(range)
+    note.select(range)
   }
 
   return {
