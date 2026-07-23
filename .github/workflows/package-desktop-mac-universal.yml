@@ -53,6 +53,7 @@ jobs:
         run: bun run build
         working-directory: packages/desktop
         env:
+          NODE_OPTIONS: --max-old-space-size=4096
           OPENCODE_CHANNEL: prod
 
       - name: Package DMG
