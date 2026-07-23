@@ -66,6 +66,21 @@ jobs:
         env:
           OPENCODE_CHANNEL: prod
 
+      - name: Build TUI binary
+        run: bun run script/build.ts --single
+        working-directory: packages/opencode
+        env:
+          OPENCODE_CHANNEL: prod
+          OPENCODE_VERSION: ${{ inputs.version }}
+
+      - name: Package TUI tar.gz
+        run: |
+          BINARY_DIR="dist/opencode-darwin-arm64"
+          if [ -d "$BINARY_DIR" ]; then
+            tar -czf "opencode-darwin-arm64.tar.gz" -C "$BINARY_DIR" .
+          fi
+        working-directory: packages/opencode
+
       - name: Create Release
         run: |
           TAG="v${{ inputs.version }}"
@@ -73,11 +88,14 @@ jobs:
           NOTES="${{ inputs.notes || '' }}"
           if [ -z "$TITLE" ]; then TITLE="v${{ inputs.version }}"; fi
           if [ -z "$NOTES" ]; then NOTES="Auto-built from dev-my branch"; fi
+          ASSETS="dist/opencode-desktop-mac-universal.dmg"
+          TUI_TAR="../opencode/opencode-darwin-arm64.tar.gz"
+          if [ -f "$TUI_TAR" ]; then ASSETS="$ASSETS $TUI_TAR"; fi
           gh release create "$TAG" \
             --title "$TITLE" \
             --notes "$NOTES" \
             --prerelease \
-            dist/opencode-desktop-mac-universal.dmg
+            $ASSETS
         working-directory: packages/desktop
         env:
           GH_TOKEN: ${{ github.token }}
