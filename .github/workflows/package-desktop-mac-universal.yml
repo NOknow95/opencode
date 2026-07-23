@@ -1,0 +1,79 @@
+name: package-desktop-mac-universal
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 1.18.4-alpha.1)"
+        required: true
+        type: string
+      title:
+        description: "Release title (default: v{version})"
+        required: false
+        type: string
+      notes:
+        description: "Release notes (markdown)"
+        required: false
+        type: string
+        default: "Auto-built from dev-my branch"
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build CLI binary
+        run: bun run script/build-node.ts
+        working-directory: packages/opencode
+        env:
+          OPENCODE_CHANNEL: prod
+          OPENCODE_VERSION: ${{ inputs.version }}
+
+      - name: Prepare desktop
+        run: bun ./scripts/prepare.ts
+        working-directory: packages/desktop
+        env:
+          OPENCODE_CHANNEL: prod
+          OPENCODE_VERSION: ${{ inputs.version }}
+
+      - name: Build Electron
+        run: bun run build
+        working-directory: packages/desktop
+        env:
+          OPENCODE_CHANNEL: prod
+
+      - name: Package DMG
+        run: npx electron-builder --mac --universal --publish never \
+          --config.mac.identity=null \
+          --config.mac.notarize=false \
+          --config.dmg.sign=false \
+          --config electron-builder.config.ts
+        working-directory: packages/desktop
+        env:
+          OPENCODE_CHANNEL: prod
+
+      - name: Create Release
+        run: |
+          TAG="v${{ inputs.version }}"
+          TITLE="${{ inputs.title || '' }}"
+          NOTES="${{ inputs.notes || '' }}"
+          if [ -z "$TITLE" ]; then TITLE="v${{ inputs.version }}"; fi
+          if [ -z "$NOTES" ]; then NOTES="Auto-built from dev-my branch"; fi
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --prerelease \
+            dist/opencode-desktop-mac-universal.dmg
+        working-directory: packages/desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
