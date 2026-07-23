@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect, Layer, Context, Schema, Scope } from "effect"
 import { formatPatch, structuredPatch } from "diff"
+import path from "path"
 import { InstanceState } from "@/effect/instance-state"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { Git } from "@/git"
@@ -288,9 +289,18 @@ export interface Interface {
   readonly apply: (input: ApplyInput) => Effect.Effect<ApplyResult, PatchApplyError>
 }
 
+interface NestedRepoState {
+  directory: string
+  relative: string
+  current: string | undefined
+  root: Git.Base | undefined
+  hasHead: boolean
+}
+
 interface State {
   current: string | undefined
   root: Git.Base | undefined
+  nested: NestedRepoState[]
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Vcs") {}
@@ -305,7 +315,7 @@ const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Vcs.state")(function* (ctx) {
         if (ctx.project.vcs !== "git") {
-          return { current: undefined, root: undefined }
+          return { current: undefined, root: undefined, nested: [] }
         }
 
         const get = Effect.fnUntraced(function* () {
@@ -314,7 +324,19 @@ const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = 
         const [current, root] = yield* Effect.all([git.branch(ctx.directory), git.defaultBranch(ctx.directory)], {
           concurrency: 2,
         })
-        const value = { current, root }
+        const nested = yield* Effect.forEach(
+          ctx.project.nested ?? [],
+          (nestedDir) =>
+            Effect.gen(function* () {
+              const [current, root, hasHead] = yield* Effect.all(
+                [git.branch(nestedDir), git.defaultBranch(nestedDir), git.hasHead(nestedDir)],
+                { concurrency: 3 },
+              )
+              return { directory: nestedDir, relative: path.relative(ctx.directory, nestedDir), current, root, hasHead }
+            }),
+          { concurrency: "unbounded" },
+        )
+        const value = { current, root, nested }
 
         const unsubscribe = yield* events.listen((event) => {
           if (event.type !== Watcher.Event.Updated.type || event.location?.directory !== ctx.directory)
@@ -346,71 +368,129 @@ const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = 
         return yield* InstanceState.use(state, (x) => x.root?.name)
       }),
       status: Effect.fn("Vcs.status")(function* () {
+        const value = yield* InstanceState.get(state)
         const ctx = yield* InstanceState.context
         if (ctx.project.vcs !== "git") return []
-        const ref = (yield* git.hasHead(ctx.directory)) ? "HEAD" : undefined
-        const [list, stats] = yield* Effect.all(
-          [git.status(ctx.directory), ref ? git.stats(ctx.directory, ref) : Effect.succeed([])],
-          { concurrency: 2 },
+
+        const repoStatus = Effect.fnUntraced(function* (directory: string, prefix: string) {
+          const ref = (yield* git.hasHead(directory)) ? "HEAD" : undefined
+          const [list, stats] = yield* Effect.all(
+            [git.status(directory), ref ? git.stats(directory, ref) : Effect.succeed([])],
+            { concurrency: 2 },
+          )
+          const map = nums(stats)
+          return yield* Effect.forEach(
+            list.toSorted((a, b) => a.file.localeCompare(b.file)),
+            (item) =>
+              Effect.gen(function* () {
+                const stat =
+                  map.get(item.file) ??
+                  (item.status === "added" ? yield* git.statUntracked(directory, item.file) : undefined)
+                return {
+                  file: prefix ? path.posix.join(prefix, item.file) : item.file,
+                  additions: stat?.additions ?? 0,
+                  deletions: stat?.deletions ?? 0,
+                  status: item.status,
+                } satisfies FileStatus
+              }),
+          )
+        })
+
+        const main = yield* repoStatus(ctx.directory, "")
+        const allNested = yield* Effect.forEach(
+          value.nested,
+          (n) => repoStatus(n.directory, n.relative),
+          { concurrency: "unbounded" },
         )
-        const map = nums(stats)
-        return yield* Effect.forEach(
-          list.toSorted((a, b) => a.file.localeCompare(b.file)),
-          (item) =>
-            Effect.gen(function* () {
-              const stat =
-                map.get(item.file) ??
-                (item.status === "added" ? yield* git.statUntracked(ctx.worktree, item.file) : undefined)
-              return {
-                file: item.file,
-                additions: stat?.additions ?? 0,
-                deletions: stat?.deletions ?? 0,
-                status: item.status,
-              } satisfies FileStatus
-            }),
-        )
+
+        const seen = new Map<string, FileStatus>()
+        for (const item of [...main, ...allNested.flat()]) {
+          if (!seen.has(item.file)) seen.set(item.file, item)
+        }
+        return [...seen.values()]
       }),
       diff: Effect.fn("Vcs.diff")(function* (mode: Mode, options?: DiffOptions) {
         const value = yield* InstanceState.get(state)
         const ctx = yield* InstanceState.context
         if (ctx.project.vcs !== "git") return []
-        if (mode === "git") {
-          return yield* track(git, ctx.directory, (yield* git.hasHead(ctx.directory)) ? "HEAD" : undefined, options)
-        }
 
-        if (!value.root) return []
-        if (value.current && value.current === value.root.name) return []
-        const ref = yield* git.mergeBase(ctx.directory, value.root.ref)
-        if (!ref) return []
-        return yield* diffAgainstRef(git, ctx.directory, ref, options)
+        const repoDiff = Effect.fnUntraced(function* (directory: string, prefix: string) {
+          if (mode === "git") {
+            const items = yield* track(git, directory, (yield* git.hasHead(directory)) ? "HEAD" : undefined, options)
+            return items.map((item) => (prefix ? { ...item, file: path.posix.join(prefix, item.file) } : item))
+          }
+
+          const root = yield* git.defaultBranch(directory)
+          if (!root) return []
+          const current = yield* git.branch(directory)
+          if (current && current === root.name) return []
+          const ref = yield* git.mergeBase(directory, root.ref)
+          if (!ref) return []
+          const items = yield* diffAgainstRef(git, directory, ref, options)
+          return items.map((item) => (prefix ? { ...item, file: path.posix.join(prefix, item.file) } : item))
+        })
+
+        const main = yield* repoDiff(ctx.directory, "")
+        const allNested = yield* Effect.forEach(
+          value.nested,
+          (n) => repoDiff(n.directory, n.relative),
+          { concurrency: "unbounded" },
+        )
+
+        return [...main, ...allNested.flat()]
       }),
       diffRaw: Effect.fn("Vcs.diffRaw")(function* () {
+        const value = yield* InstanceState.get(state)
         const ctx = yield* InstanceState.context
         if (ctx.project.vcs !== "git") return ""
-        const [hasHead, status] = yield* Effect.all([git.hasHead(ctx.directory), git.status(ctx.directory)], {
-          concurrency: 2,
+
+        const repoRaw = Effect.fnUntraced(function* (directory: string) {
+          const [hasHead, status] = yield* Effect.all([git.hasHead(directory), git.status(directory)], {
+            concurrency: 2,
+          })
+          const tracked = hasHead ? (yield* git.patchAll(directory, "HEAD")).text : ""
+          const untracked = yield* Effect.forEach(
+            status.filter((item) => item.code === "??"),
+            (item) => git.patchUntracked(directory, item.file).pipe(Effect.map((patch) => patch.text)),
+          )
+          return [tracked, ...untracked].filter(Boolean).join("\n")
         })
-        const tracked = hasHead ? (yield* git.patchAll(ctx.directory, "HEAD")).text : ""
-        const untracked = yield* Effect.forEach(
-          status.filter((item) => item.code === "??"),
-          (item) => git.patchUntracked(ctx.directory, item.file).pipe(Effect.map((patch) => patch.text)),
-        )
-        return [tracked, ...untracked].filter(Boolean).join("\n")
+
+        const main = yield* repoRaw(ctx.directory)
+        const allNested = yield* Effect.forEach(value.nested, (n) => repoRaw(n.directory), {
+          concurrency: "unbounded",
+        })
+        return [main, ...allNested].filter(Boolean).join("\n")
       }),
       apply: Effect.fn("Vcs.apply")(function* (input: ApplyInput) {
+        const value = yield* InstanceState.get(state)
         const ctx = yield* InstanceState.context
         if (ctx.project.vcs !== "git") {
-          return yield* new PatchApplyError({
-            message: "Patch can't be applied because the project is not git-based",
-            reason: "non-git",
-          })
+          return yield* new PatchApplyError({ message: "Not a git project", reason: "non-git" })
         }
+
+        const file = fileFromPatchChunk(input.patch)
+        const matched = file
+          ? value.nested
+              .filter((n) => file.startsWith(n.relative + "/") || file === n.relative)
+              .toSorted((a, b) => b.relative.length - a.relative.length)[0]
+          : undefined
+
+        if (matched) {
+          const adjusted = input.patch
+            .replaceAll(`/${matched.relative}/`, "/")
+            .replaceAll(`a/${matched.relative}/`, "a/")
+            .replaceAll(`b/${matched.relative}/`, "b/")
+          const applied = yield* git.applyPatch(matched.directory, adjusted)
+          if (applied.exitCode !== 0) {
+            return yield* new PatchApplyError({ message: "Patch apply failed in nested repo", reason: "not-clean" })
+          }
+          return { applied: true }
+        }
+
         const applied = yield* git.applyPatch(ctx.directory, input.patch)
         if (applied.exitCode !== 0) {
-          return yield* new PatchApplyError({
-            message: "Patch can't be applied",
-            reason: "not-clean",
-          })
+          return yield* new PatchApplyError({ message: "Patch apply failed", reason: "not-clean" })
         }
         return { applied: true }
       }),

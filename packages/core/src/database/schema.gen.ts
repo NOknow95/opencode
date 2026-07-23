@@ -121,6 +121,7 @@ export default {
           \`time_updated\` integer NOT NULL,
           \`time_initialized\` integer,
           \`sandboxes\` text NOT NULL,
+          \`nested\` text,
           \`commands\` text
         );
       `)

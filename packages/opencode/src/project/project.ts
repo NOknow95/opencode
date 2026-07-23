@@ -22,6 +22,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Project } from "@opencode-ai/schema/project"
+import { NestedRepos } from "./nested-repos"
 
 export const Info = Project.Info
 export type Info = Types.DeepMutable<Schema.Schema.Type<typeof Info>>
@@ -53,6 +54,7 @@ export function fromRow(row: Row): Info {
       initialized: row.time_initialized ?? undefined,
     },
     sandboxes: row.sandboxes,
+    nested: row.nested ?? undefined,
     commands: row.commands ?? undefined,
   }
 }
@@ -254,6 +256,36 @@ const layer = Layer.effect(
         { concurrency: "unbounded" },
       ).pipe(Effect.map((arr) => arr.filter((x): x is string => x !== undefined)))
 
+      // Detect nested git repos
+      if (result.vcs === "git") {
+        const nestedDirs = yield* NestedRepos.detect(fs, data.directory)
+        for (const nestedDir of nestedDirs) {
+          const nestedData = yield* projectV2.resolve(AbsolutePath.make(nestedDir)).pipe(
+            Effect.catch(() => Effect.succeed(undefined)),
+          )
+          if (!nestedData?.vcs) continue
+          const nestedID = ProjectV2.ID.make(nestedData.id)
+          yield* migrateProjectId(undefined, nestedID)
+          const existing = yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, nestedID)).get().pipe(Effect.orDie)
+          if (!existing) {
+            yield* db
+              .insert(ProjectTable)
+              .values({
+                id: nestedID,
+                worktree: AbsolutePath.make(nestedDir),
+                vcs: "git",
+                sandboxes: [],
+                time_created: Date.now(),
+                time_updated: Date.now(),
+              })
+              .run()
+              .pipe(Effect.orDie)
+          }
+          yield* saveProjectDirectory({ projectID: nestedID, directory: nestedDir })
+        }
+        result.nested = nestedDirs
+      }
+
       yield* db
         .insert(ProjectTable)
         .values({
@@ -268,6 +300,7 @@ const layer = Layer.effect(
           time_updated: result.time.updated,
           time_initialized: result.time.initialized,
           sandboxes: result.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
+          nested: result.nested ? result.nested.map((d) => AbsolutePath.make(d)) : null,
           commands: result.commands,
         })
         .onConflictDoUpdate({
@@ -282,6 +315,7 @@ const layer = Layer.effect(
             time_updated: result.time.updated,
             time_initialized: result.time.initialized,
             sandboxes: result.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
+            nested: result.nested ? result.nested.map((d) => AbsolutePath.make(d)) : null,
             commands: result.commands,
           },
         })

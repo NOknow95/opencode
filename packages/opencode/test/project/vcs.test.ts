@@ -1,4 +1,4 @@
-import { afterEach, describe, expect } from "bun:test"
+import { afterEach, describe, expect, it as standaloneIt } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -12,12 +12,16 @@ import {
   testInstanceStoreLayer,
   TestInstance,
   tmpdirScoped,
+  tmpdir,
 } from "../fixture/fixture"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { Git } from "../../src/git"
 import { Vcs } from "@/project/vcs"
 import { testEffect } from "../lib/effect"
+import { InstanceRef } from "../../src/effect/instance-ref"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import type { InstanceContext } from "../../src/project/instance-context"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -332,4 +336,43 @@ describe("Vcs diff", () => {
       }),
     { git: true },
   )
+
+  standaloneIt("status() includes nested repo changes", async () => {
+    await using root = await tmpdir({ git: true })
+    const nestedDir = path.posix.join(root.path, "nested")
+    await fs.mkdir(nestedDir, { recursive: true })
+    await Bun.$`git init -q`.cwd(nestedDir)
+    await Bun.$`git config user.email "test@test.test"`.cwd(nestedDir)
+    await Bun.$`git config user.name "Test"`.cwd(nestedDir)
+    await Bun.$`git branch -M main`.cwd(nestedDir)
+    await Bun.write(path.posix.join(nestedDir, "file.txt"), "hello\n")
+    await Bun.$`git add .`.cwd(nestedDir)
+    await Bun.$`git commit --no-gpg-sign -m init`.cwd(nestedDir)
+    await Bun.write(path.posix.join(nestedDir, "file.txt"), "changed\n")
+
+    const ctx: InstanceContext = {
+      directory: root.path,
+      worktree: root.path,
+      project: {
+        id: ProjectV2.ID.global,
+        worktree: root.path,
+        vcs: "git",
+        time: { created: Date.now(), updated: Date.now() },
+        sandboxes: [],
+        nested: [nestedDir],
+      },
+    }
+
+    const status = await Effect.runPromise(
+      Effect.gen(function* () {
+        const vcs = yield* Vcs.Service
+        yield* vcs.init()
+        return yield* vcs.status()
+      }).pipe(Effect.provideService(InstanceRef, ctx), Effect.provide(layer)),
+    )
+
+    expect(status).toEqual(
+      expect.arrayContaining([expect.objectContaining({ file: "nested/file.txt", status: "modified" })]),
+    )
+  })
 })

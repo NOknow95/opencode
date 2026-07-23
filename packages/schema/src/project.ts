@@ -37,6 +37,7 @@ export const Info = Schema.Struct({
   commands: optional(Commands),
   time: Time,
   sandboxes: Schema.Array(Schema.String),
+  nested: optional(Schema.Array(Schema.String)),
 }).annotate({ identifier: "Project" })
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 
