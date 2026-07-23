@@ -1,12 +1,12 @@
 ---
 name: desktop-tui-workflow-trigger
-description: Trigger GitHub Actions to build macOS universal DMG and TUI binary, then publish release
+description: Trigger GitHub Actions to build macOS arm64 DMG and TUI binary, then publish release
 ---
 
 # Desktop + TUI Workflow Trigger
 
-在 fork 仓库的 `dev-my` 分支上触发 `package-desktop-mac-universal` workflow，自动打包：
-1. macOS universal DMG（桌面版，Intel + Apple Silicon）
+在 fork 仓库的 `dev-my` 分支上触发 `package-desktop-mac-arm64` workflow，自动打包：
+1. macOS arm64 DMG（桌面版，Apple Silicon）
 2. macOS arm64 TUI 二进制（CLI 版）
 
 并发布到 GitHub Release。
@@ -29,7 +29,7 @@ description: Trigger GitHub Actions to build macOS universal DMG and TUI binary,
 ### 2. 触发 workflow
 
 ```bash
-gh workflow run package-desktop-mac-universal --ref dev-my \
+gh workflow run package-desktop-mac-arm64 --ref dev-my \
   -f version="{version}" \
   -f title="{title}" \
   -f notes="{notes}"
@@ -40,5 +40,5 @@ gh workflow run package-desktop-mac-universal --ref dev-my \
 ## 产物
 
 Release 中包含：
-- `opencode-desktop-mac-universal.dmg` — 桌面版安装包
+- `opencode-desktop-mac-arm64.dmg` — 桌面版安装包
 - `opencode-darwin-arm64.tar.gz` — TUI CLI 二进制
